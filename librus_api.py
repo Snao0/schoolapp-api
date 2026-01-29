@@ -76,8 +76,11 @@ class LibrusAPI:
                 
                 return {"success": False, "error": "Could not verify login"}
                 
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+                return {"success": False, "error": "Could not verify login"}
+                
+        except Exception:
+            import traceback
+            return {"success": False, "error": traceback.format_exc()}
     
     async def _activate_api_access(self, session) -> bool:
         """Activate API access by calling TokenInfo and UserInfo endpoints."""
