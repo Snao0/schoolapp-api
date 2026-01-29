@@ -13,7 +13,9 @@ class LibrusAPI:
         Based on librusik implementation.
         """
         try:
-            async with aiohttp.ClientSession() as session:
+            # Set timeout to 25s (less than Gunicorn 30s) to prevent 502
+            timeout = aiohttp.ClientTimeout(total=25)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 # Step 1: Initialize OAuth
                 await session.get(
                     "https://api.librus.pl/OAuth/Authorization?client_id=46&response_type=code&scope=mydata"
