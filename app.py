@@ -8,7 +8,16 @@ import requests
 from collections import defaultdict
 
 app = Flask(__name__)
-CORS(app)
+# Enable CORS for all domains/routes
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+# Force headers on every response (failsafe)
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 # In-memory session storage (for free tier simplicity)
 # In production, use Redis or database
