@@ -205,21 +205,30 @@ class LibrusAPI:
             
             # Categorize
             short = att_type.get("short", "").lower()
+            name_lower = att_type.get("name", "").lower()
             is_presence = att_type.get("isPresence", False)
             
-            if is_presence or short == "ob":
-                stats["present"] += 1
-                by_subject[subject_name]["present"] += 1
-                category = "present"
-            elif short in ["u", "nu", "us"]:
-                stats["excused"] += 1
-                by_subject[subject_name]["excused"] += 1
-                category = "excused"
-            elif short == "sp":
+            # Check for late (spóźnienie) - multiple variants
+            is_late = (
+                short in ["sp", "spu", "spn"] or 
+                "spóźn" in name_lower or 
+                "spozn" in name_lower or
+                "późn" in name_lower
+            )
+            
+            if is_late:
                 stats["late"] += 1
                 by_subject[subject_name]["late"] += 1
                 category = "late"
-            elif short == "nb":
+            elif is_presence or short == "ob":
+                stats["present"] += 1
+                by_subject[subject_name]["present"] += 1
+                category = "present"
+            elif short in ["u", "nu", "us", "ub"] or "uspraw" in name_lower:
+                stats["excused"] += 1
+                by_subject[subject_name]["excused"] += 1
+                category = "excused"
+            elif short == "nb" or "nieobec" in name_lower:
                 stats["absent"] += 1
                 by_subject[subject_name]["absent"] += 1
                 category = "absent"
