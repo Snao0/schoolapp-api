@@ -233,6 +233,7 @@ class LibrusAPI:
                 "type": att_type.get("name", ""),
                 "short": att_type.get("short", ""),
                 "category": category,
+                "semester": att.get("Semester", 1),
                 "teacher": f"{teacher.get('FirstName', '')} {teacher.get('LastName', '')}".strip()
             })
         
