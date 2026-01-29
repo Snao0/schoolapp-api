@@ -14,8 +14,13 @@ class LibrusAPI:
         """
         try:
             # Set timeout to 25s (less than Gunicorn 30s) to prevent 502
+            # Add User-Agent to avoid being blocked as bot
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
             timeout = aiohttp.ClientTimeout(total=25)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                 # Step 1: Initialize OAuth
                 await session.get(
                     "https://api.librus.pl/OAuth/Authorization?client_id=46&response_type=code&scope=mydata"
@@ -34,7 +39,7 @@ class LibrusAPI:
                 
                 # Check for login error
                 text = await resp.text()
-                if "Nieprawidłowy login" in text or resp.status == 401:
+                if "Nieprawidłowy login" in text: # Removed 401 check to rely on text or flow failure
                     return {"success": False, "error": "Nieprawidłowy login lub hasło"}
                 
                 # Step 3: Grant access
@@ -45,9 +50,9 @@ class LibrusAPI:
                 if resp.status != 200:
                     return {"success": False, "error": "Grant failed"}
                 
-                # Get cookies from session
-                cookies = session.cookie_jar.filter_cookies("https://synergia.librus.pl")
-                self.cookies = {k: v.value for k, v in cookies.items()}
+                # Get cookies directly from Grant response (best practice from librusik)
+                # Note: aiohttp response.cookies is a SimpleCookie, we convert to dict
+                self.cookies = {k: v.value for k, v in resp.cookies.items()}
                 
                 # Step 4: Activate API access
                 activated = await self._activate_api_access(session)
