@@ -186,6 +186,9 @@ class LibrusAPI:
             "other": 0
         }
         
+        # Per-subject stats
+        by_subject = {}
+        
         for att in attendances_data["Attendances"]:
             type_id = att.get("Type", {}).get("Id")
             lesson_id = att.get("Lesson", {}).get("Id")
@@ -196,21 +199,29 @@ class LibrusAPI:
             subject_name = subjects.get(subject_id, "Nieznany")
             teacher = teachers.get(teacher_id, {"FirstName": "", "LastName": ""})
             
+            # Initialize subject stats if not exists
+            if subject_name not in by_subject:
+                by_subject[subject_name] = {"present": 0, "absent": 0, "late": 0, "excused": 0}
+            
             # Categorize
             short = att_type.get("short", "").lower()
             is_presence = att_type.get("isPresence", False)
             
             if is_presence or short == "ob":
                 stats["present"] += 1
+                by_subject[subject_name]["present"] += 1
                 category = "present"
             elif short in ["u", "nu", "us"]:
                 stats["excused"] += 1
+                by_subject[subject_name]["excused"] += 1
                 category = "excused"
             elif short == "sp":
                 stats["late"] += 1
+                by_subject[subject_name]["late"] += 1
                 category = "late"
             elif short == "nb":
                 stats["absent"] += 1
+                by_subject[subject_name]["absent"] += 1
                 category = "absent"
             else:
                 stats["other"] += 1
@@ -231,11 +242,32 @@ class LibrusAPI:
         if total > 0:
             percentage = round((stats["present"] + stats["excused"]) / total * 100, 1)
         
+        # Build per-subject list with percentages
+        subjects_list = []
+        for subj_name, subj_stats in sorted(by_subject.items()):
+            ob = subj_stats["present"] + subj_stats["excused"]
+            nb = subj_stats["absent"]
+            subj_total = ob + nb + subj_stats["late"]
+            subj_pct = round(ob / subj_total * 100, 1) if subj_total > 0 else 100
+            
+            subjects_list.append({
+                "name": subj_name,
+                "present": subj_stats["present"],
+                "excused": subj_stats["excused"],
+                "absent": subj_stats["absent"],
+                "late": subj_stats["late"],
+                "percentage": subj_pct
+            })
+        
+        # Sort by percentage ascending (worst first)
+        subjects_list.sort(key=lambda x: x["percentage"])
+        
         return {
             "attendances": result,
             "stats": stats,
             "percentage": percentage,
-            "total": total
+            "total": total,
+            "bySubject": subjects_list
         }
     
     async def get_grades(self):
