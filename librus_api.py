@@ -13,14 +13,7 @@ class LibrusAPI:
         Based on librusik implementation.
         """
         try:
-            # Set timeout to 25s (less than Gunicorn 30s) to prevent 502
-            # Add User-Agent to avoid being blocked as bot
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            timeout = aiohttp.ClientTimeout(total=25)
-            
-            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with aiohttp.ClientSession() as session:
                 # Step 1: Initialize OAuth
                 await session.get(
                     "https://api.librus.pl/OAuth/Authorization?client_id=46&response_type=code&scope=mydata"
@@ -39,7 +32,7 @@ class LibrusAPI:
                 
                 # Check for login error
                 text = await resp.text()
-                if "Nieprawidłowy login" in text: # Removed 401 check to rely on text or flow failure
+                if "Nieprawidłowy login" in text or resp.status == 401:
                     return {"success": False, "error": "Nieprawidłowy login lub hasło"}
                 
                 # Step 3: Grant access
@@ -50,9 +43,9 @@ class LibrusAPI:
                 if resp.status != 200:
                     return {"success": False, "error": "Grant failed"}
                 
-                # Get cookies directly from Grant response (best practice from librusik)
-                # Note: aiohttp response.cookies is a SimpleCookie, we convert to dict
-                self.cookies = {k: v.value for k, v in resp.cookies.items()}
+                # Get cookies from session
+                cookies = session.cookie_jar.filter_cookies("https://synergia.librus.pl")
+                self.cookies = {k: v.value for k, v in cookies.items()}
                 
                 # Step 4: Activate API access
                 activated = await self._activate_api_access(session)
@@ -76,11 +69,8 @@ class LibrusAPI:
                 
                 return {"success": False, "error": "Could not verify login"}
                 
-                return {"success": False, "error": "Could not verify login"}
-                
-        except Exception:
-            import traceback
-            return {"success": False, "error": traceback.format_exc()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
     
     async def _activate_api_access(self, session) -> bool:
         """Activate API access by calling TokenInfo and UserInfo endpoints."""
@@ -215,30 +205,21 @@ class LibrusAPI:
             
             # Categorize
             short = att_type.get("short", "").lower()
-            name_lower = att_type.get("name", "").lower()
             is_presence = att_type.get("isPresence", False)
             
-            # Check for late (spóźnienie) - multiple variants
-            is_late = (
-                short in ["sp", "spu", "spn"] or 
-                "spóźn" in name_lower or 
-                "spozn" in name_lower or
-                "późn" in name_lower
-            )
-            
-            if is_late:
-                stats["late"] += 1
-                by_subject[subject_name]["late"] += 1
-                category = "late"
-            elif is_presence or short == "ob":
+            if is_presence or short == "ob":
                 stats["present"] += 1
                 by_subject[subject_name]["present"] += 1
                 category = "present"
-            elif short in ["u", "nu", "us", "ub"] or "uspraw" in name_lower:
+            elif short in ["u", "nu", "us"]:
                 stats["excused"] += 1
                 by_subject[subject_name]["excused"] += 1
                 category = "excused"
-            elif short == "nb" or "nieobec" in name_lower:
+            elif short == "sp":
+                stats["late"] += 1
+                by_subject[subject_name]["late"] += 1
+                category = "late"
+            elif short == "nb":
                 stats["absent"] += 1
                 by_subject[subject_name]["absent"] += 1
                 category = "absent"

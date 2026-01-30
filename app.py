@@ -5,31 +5,16 @@ import asyncio
 import uuid
 import time
 import requests
-from collections import defaultdict
 
 app = Flask(__name__)
-# Enable CORS for all domains/routes
-CORS(app, resources={r"/*": {"origins": "*"}})
-
-# Force headers on every response (failsafe)
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    return response
+CORS(app)
 
 # In-memory session storage (for free tier simplicity)
 # In production, use Redis or database
 sessions = {}
 
-# Session timeout (15 minutes - security improvement)
-SESSION_TIMEOUT = 15 * 60
-
-# Rate limiting for login attempts
-login_attempts = defaultdict(list)
-MAX_LOGIN_ATTEMPTS = 5  # Max attempts per IP
-LOGIN_WINDOW = 300  # 5 minutes window
+# Session timeout (30 minutes)
+SESSION_TIMEOUT = 30 * 60
 
 def cleanup_old_sessions():
     """Remove expired sessions."""
@@ -48,40 +33,11 @@ def get_session(token: str) -> dict:
             return None
     return session
 
-def check_rate_limit(ip: str) -> bool:
-    """Check if IP is rate limited. Returns True if allowed, False if blocked."""
-    current_time = time.time()
-    # Clean old attempts
-    login_attempts[ip] = [t for t in login_attempts[ip] if current_time - t < LOGIN_WINDOW]
-    
-    if len(login_attempts[ip]) >= MAX_LOGIN_ATTEMPTS:
-        return False
-    return True
-
-def record_login_attempt(ip: str):
-    """Record a login attempt for rate limiting."""
-    login_attempts[ip].append(time.time())
-
-def get_client_ip():
-    """Get client IP, considering proxies."""
-    if request.headers.get('X-Forwarded-For'):
-        return request.headers.get('X-Forwarded-For').split(',')[0].strip()
-    return request.remote_addr or 'unknown'
-
 # ========== LIBRUS ENDPOINTS ==========
 
 @app.route('/librus/login', methods=['POST'])
 def librus_login():
     """Login to Librus and return session token."""
-    client_ip = get_client_ip()
-    
-    # Check rate limit
-    if not check_rate_limit(client_ip):
-        return jsonify({
-            "success": False, 
-            "error": "Zbyt wiele prób logowania. Spróbuj za 5 minut."
-        }), 429
-    
     data = request.json
     if not data:
         return jsonify({"success": False, "error": "No data provided"}), 400
@@ -91,9 +47,6 @@ def librus_login():
     
     if not login or not password:
         return jsonify({"success": False, "error": "Missing login or password"}), 400
-    
-    # Record this attempt for rate limiting
-    record_login_attempt(client_ip)
     
     async def do_login():
         api = LibrusAPI()
@@ -224,7 +177,7 @@ def edupage_proxy():
         except:
             return resp.text, resp.status_code
     except Exception as e:
-        return jsonify({"error": "Request failed"}), 500
+        return jsonify({"error": str(e)}), 500
 
 # ========== HEALTH CHECK ==========
 
@@ -242,8 +195,7 @@ def home():
     """Home page."""
     return jsonify({
         "name": "SchoolTimetable API",
-        "version": "1.1.0",
-        "security": "Rate limited, 15min sessions",
+        "version": "1.0.0",
         "endpoints": [
             "POST /librus/login",
             "GET /librus/attendances",
