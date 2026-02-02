@@ -241,14 +241,14 @@ class LibrusAPI:
         total = stats["present"] + stats["absent"] + stats["late"] + stats["excused"]
         percentage = 0
         if total > 0:
-            percentage = round(stats["present"] / total * 100, 1)
+            percentage = round(stats["present"] / total * 100)
         
         # Build per-subject list with percentages
         subjects_list = []
         for subj_name, subj_stats in sorted(by_subject.items()):
             subj_total = subj_stats["present"] + subj_stats["absent"] + subj_stats["late"] + subj_stats["excused"]
             # Only present counts as attendance
-            subj_pct = round(subj_stats["present"] / subj_total * 100, 1) if subj_total > 0 else 100
+            subj_pct = round(subj_stats["present"] / subj_total * 100) if subj_total > 0 else 100
             
             subjects_list.append({
                 "name": subj_name,
