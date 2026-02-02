@@ -259,8 +259,8 @@ class LibrusAPI:
                 "percentage": subj_pct
             })
         
-        # Sort by percentage ascending (worst first)
-        subjects_list.sort(key=lambda x: x["percentage"])
+        # Sort by percentage descending (best first)
+        subjects_list.sort(key=lambda x: x["percentage"], reverse=True)
         
         return {
             "attendances": result,
