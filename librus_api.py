@@ -207,7 +207,11 @@ class LibrusAPI:
             short = att_type.get("short", "").lower()
             is_presence = att_type.get("isPresence", False)
             
-            if is_presence or short == "ob":
+            if short == "sp" or "spóźn" in att_type.get("name", "").lower():
+                stats["late"] += 1
+                by_subject[subject_name]["late"] += 1
+                category = "late"
+            elif is_presence or short == "ob":
                 stats["present"] += 1
                 by_subject[subject_name]["present"] += 1
                 category = "present"
@@ -215,10 +219,6 @@ class LibrusAPI:
                 stats["excused"] += 1
                 by_subject[subject_name]["excused"] += 1
                 category = "excused"
-            elif short == "sp":
-                stats["late"] += 1
-                by_subject[subject_name]["late"] += 1
-                category = "late"
             elif short == "nb":
                 stats["absent"] += 1
                 by_subject[subject_name]["absent"] += 1
@@ -237,18 +237,18 @@ class LibrusAPI:
                 "teacher": f"{teacher.get('FirstName', '')} {teacher.get('LastName', '')}".strip()
             })
         
-        # Calculate percentage - only present counts (excused are still absences)
+        # Calculate percentage - present AND late counts (excused are still absences)
         total = stats["present"] + stats["absent"] + stats["late"] + stats["excused"]
         percentage = 0
         if total > 0:
-            percentage = round(stats["present"] / total * 100)
+            percentage = round((stats["present"] + stats["late"]) / total * 100)
         
         # Build per-subject list with percentages
         subjects_list = []
         for subj_name, subj_stats in sorted(by_subject.items()):
             subj_total = subj_stats["present"] + subj_stats["absent"] + subj_stats["late"] + subj_stats["excused"]
-            # Only present counts as attendance
-            subj_pct = round(subj_stats["present"] / subj_total * 100) if subj_total > 0 else 100
+            # Present AND late counts as attendance
+            subj_pct = round((subj_stats["present"] + subj_stats["late"]) / subj_total * 100) if subj_total > 0 else 100
             
             subjects_list.append({
                 "name": subj_name,
