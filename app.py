@@ -176,6 +176,20 @@ def health():
         "time": time.strftime("%Y-%m-%d %H:%M:%S")
     })
 
+@app.route('/test-librus', methods=['GET'])
+def test_librus():
+    try:
+        start = time.time()
+        resp = req_lib.get("https://api.librus.pl/OAuth/Authorization?client_id=46", timeout=5)
+        duration = time.time() - start
+        return jsonify({
+            "status": resp.status_code,
+            "time_taken": duration,
+            "text": resp.text[:200]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "time_taken": time.time() - start}), 500
+
 @app.route('/', methods=['GET'])
 def home():
     """Home page."""
