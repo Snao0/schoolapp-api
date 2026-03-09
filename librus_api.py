@@ -1,9 +1,31 @@
 import requests
+from requests.cookies import RequestsCookieJar
 
 class LibrusAPI:
     def __init__(self, cookies=None):
         self.host = "https://synergia.librus.pl/gateway/api/2.0/"
-        self.cookies = cookies or {}
+        # cookies is stored as a list of dicts: [{"name": ..., "value": ..., "domain": ..., "path": ...}]
+        self.cookies_list = cookies or []
+
+    def _build_cookie_jar(self):
+        """Rebuild a CookieJar from stored cookie list."""
+        jar = RequestsCookieJar()
+        for c in self.cookies_list:
+            jar.set(c["name"], c["value"], domain=c.get("domain", ""), path=c.get("path", "/"))
+        return jar
+
+    @staticmethod
+    def _serialize_cookies(session):
+        """Serialize a session's cookies into a list of dicts (handles duplicates)."""
+        result = []
+        for cookie in session.cookies:
+            result.append({
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": cookie.domain,
+                "path": cookie.path
+            })
+        return result
 
     def login(self, login: str, password: str) -> dict:
         """
@@ -48,10 +70,10 @@ class LibrusAPI:
                 timeout=15
             )
 
-            # Extract cookies for Synergia
-            self.cookies = dict(session.cookies)
+            # Serialize all cookies (handles duplicates properly)
+            self.cookies_list = self._serialize_cookies(session)
 
-            # Step 4: Verify by getting /Me
+            # Step 4: Verify by getting /Me (reuse same session which already has cookies)
             me_resp = session.get(
                 self.host + "Me",
                 timeout=10
@@ -63,7 +85,7 @@ class LibrusAPI:
                     user_info = me_data.get("Me", {}).get("Account", {})
                     return {
                         "success": True,
-                        "cookies": self.cookies,
+                        "cookies": self.cookies_list,
                         "user": {
                             "firstName": user_info.get("FirstName"),
                             "lastName": user_info.get("LastName"),
@@ -82,13 +104,14 @@ class LibrusAPI:
 
     def get_data(self, method: str):
         """Get data from Librus API."""
-        if not self.cookies:
+        if not self.cookies_list:
             return None
 
         try:
+            jar = self._build_cookie_jar()
             resp = requests.get(
                 self.host + method,
-                cookies=self.cookies,
+                cookies=jar,
                 headers={
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     'Accept': 'application/json'
