@@ -13,6 +13,23 @@ class LibrusAPI:
         self.trace_id = trace_id or "librus"
         self.login_timeout = aiohttp.ClientTimeout(total=15, connect=10, sock_connect=10, sock_read=10)
         self.data_timeout = aiohttp.ClientTimeout(total=12, connect=8, sock_connect=8, sock_read=8)
+        self.oauth_init_timeout = aiohttp.ClientTimeout(total=25, connect=12, sock_connect=12, sock_read=20)
+        self.default_headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
+        self.oauth_headers = {
+            **self.default_headers,
+            "Referer": "https://portal.librus.pl/",
+            "Origin": "https://portal.librus.pl",
+        }
 
     def _log(self, level: int, message: str, *args, **kwargs) -> None:
         logger.log(level, "[%s] " + message, self.trace_id, *args, **kwargs)
@@ -22,6 +39,37 @@ class LibrusAPI:
             return "*" * len(login)
         hidden = max(len(login) - 4, 1)
         return f"{login[:2]}{'*' * hidden}{login[-2:]}"
+
+    async def _initialize_oauth(self, session: aiohttp.ClientSession) -> dict | None:
+        url = "https://api.librus.pl/OAuth/Authorization?client_id=46&response_type=code&scope=mydata"
+
+        for attempt in range(1, 3):
+            try:
+                self._log(logging.INFO, "Login step 1/5: initialize OAuth (attempt %s/2)", attempt)
+                async with session.get(url, headers=self.oauth_headers, timeout=self.oauth_init_timeout) as resp:
+                    await resp.read()
+                    if resp.status >= 500:
+                        self._log(logging.WARNING, "OAuth init failed with status %s", resp.status)
+                        return {"success": False, "error": "Librus jest chwilowo niedostepny", "code": "upstream_unavailable"}
+                    if resp.status >= 400:
+                        self._log(logging.WARNING, "OAuth init rejected with status %s", resp.status)
+                        return {"success": False, "error": "Librus odrzucil rozpoczecie logowania", "code": "oauth_init_failed"}
+                    return None
+            except asyncio.TimeoutError:
+                self._log(logging.WARNING, "OAuth init attempt %s timed out", attempt)
+                if attempt == 2:
+                    return {
+                        "success": False,
+                        "error": "Librus odpowiadal zbyt dlugo juz przy rozpoczeciu logowania.",
+                        "code": "timeout"
+                    }
+                await asyncio.sleep(1)
+
+        return {
+            "success": False,
+            "error": "Nie udalo sie rozpoczec logowania do Librusa.",
+            "code": "oauth_init_failed"
+        }
         
     async def login(self, login: str, password: str) -> dict:
         """
@@ -32,16 +80,11 @@ class LibrusAPI:
         self._log(logging.INFO, "Starting login flow for %s", self._mask_login(login))
 
         try:
-            async with aiohttp.ClientSession(timeout=self.login_timeout) as session:
+            async with aiohttp.ClientSession(timeout=self.login_timeout, headers=self.default_headers) as session:
                 # Step 1: Initialize OAuth
-                self._log(logging.INFO, "Login step 1/5: initialize OAuth")
-                async with session.get(
-                    "https://api.librus.pl/OAuth/Authorization?client_id=46&response_type=code&scope=mydata"
-                ) as resp:
-                    await resp.read()
-                    if resp.status >= 500:
-                        self._log(logging.WARNING, "OAuth init failed with status %s", resp.status)
-                        return {"success": False, "error": "Librus jest chwilowo niedostepny", "code": "upstream_unavailable"}
+                init_result = await self._initialize_oauth(session)
+                if init_result:
+                    return init_result
                 
                 # Step 2: Login with credentials
                 self._log(logging.INFO, "Login step 2/5: submit credentials")
@@ -52,7 +95,11 @@ class LibrusAPI:
                 
                 async with session.post(
                     "https://api.librus.pl/OAuth/Authorization?client_id=46",
-                    data=form
+                    data=form,
+                    headers={
+                        **self.oauth_headers,
+                        "Content-Type": "application/x-www-form-urlencoded"
+                    }
                 ) as resp:
                     text = await resp.text()
                     if "Nieprawidłowy login" in text or resp.status == 401:
@@ -65,7 +112,8 @@ class LibrusAPI:
                 # Step 3: Grant access
                 self._log(logging.INFO, "Login step 3/5: grant access")
                 async with session.get(
-                    "https://api.librus.pl/OAuth/Authorization/Grant?client_id=46"
+                    "https://api.librus.pl/OAuth/Authorization/Grant?client_id=46",
+                    headers=self.oauth_headers
                 ) as resp:
                     if resp.status != 200:
                         body = (await resp.text())[:200]

@@ -30,6 +30,7 @@ def librus_error_response(error_code: str, message: str | None = None):
         "request_timeout": (504, "Librus odpowiadal zbyt dlugo. Sprobuj ponownie za chwile."),
         "connection_error": (502, "Nie udalo sie polaczyc z Librusem."),
         "upstream_unavailable": (502, "Librus jest chwilowo niedostepny."),
+        "oauth_init_failed": (502, "Nie udalo sie rozpoczec logowania w Librusie."),
         "grant_failed": (502, "Librus nie zakonczyl procesu logowania."),
         "activation_failed": (502, "Nie udalo sie aktywowac sesji Librusa."),
         "login_verification_failed": (502, "Nie udalo sie potwierdzic sesji Librusa."),
