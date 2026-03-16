@@ -1,148 +1,139 @@
-import requests
-from requests.cookies import RequestsCookieJar
+import aiohttp
+import json
+from datetime import datetime
 
 class LibrusAPI:
     def __init__(self, cookies=None):
         self.host = "https://synergia.librus.pl/gateway/api/2.0/"
-        # cookies is stored as a list of dicts: [{"name": ..., "value": ..., "domain": ..., "path": ...}]
-        self.cookies_list = cookies or []
-
-    def _build_cookie_jar(self):
-        """Rebuild a CookieJar from stored cookie list."""
-        jar = RequestsCookieJar()
-        for c in self.cookies_list:
-            jar.set(c["name"], c["value"], domain=c.get("domain", ""), path=c.get("path", "/"))
-        return jar
-
-    @staticmethod
-    def _serialize_cookies(session):
-        """Serialize a session's cookies into a list of dicts (handles duplicates)."""
-        result = []
-        for cookie in session.cookies:
-            result.append({
-                "name": cookie.name,
-                "value": cookie.value,
-                "domain": cookie.domain,
-                "path": cookie.path
-            })
-        return result
-
-    def login(self, login: str, password: str) -> dict:
+        self.cookies = cookies
+        
+    async def login(self, login: str, password: str) -> dict:
         """
         Authenticate with Librus and return session cookies.
-        Uses synchronous requests (compatible with gunicorn sync workers).
+        Based on librusik implementation.
         """
         try:
-            session = requests.Session()
-            session.headers.update({
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
-            })
-
-            # Step 1: Initialize OAuth
-            session.get(
-                "https://api.librus.pl/OAuth/Authorization?client_id=46&response_type=code&scope=mydata",
-                allow_redirects=True,
-                timeout=15
-            )
-
-            # Step 2: Login with credentials
-            resp = session.post(
-                "https://api.librus.pl/OAuth/Authorization?client_id=46",
-                data={
-                    "action": "login",
-                    "login": login,
-                    "pass": password
-                },
-                allow_redirects=False,
-                timeout=15
-            )
-
-            # Check for login error
-            if "Nieprawidłowy login" in resp.text or resp.status_code == 401:
-                return {"success": False, "error": "Nieprawidłowy login lub hasło"}
-
-            # Step 3: Grant access - follow redirects to Synergia
-            resp = session.get(
-                "https://api.librus.pl/OAuth/Authorization/Grant?client_id=46",
-                allow_redirects=True,
-                timeout=15
-            )
-
-            # Serialize all cookies (handles duplicates properly)
-            self.cookies_list = self._serialize_cookies(session)
-
-            # Step 4: Verify by getting /Me (reuse same session which already has cookies)
-            me_resp = session.get(
-                self.host + "Me",
-                timeout=10
-            )
-
-            if me_resp.status_code == 200:
-                try:
-                    me_data = me_resp.json()
-                    user_info = me_data.get("Me", {}).get("Account", {})
+            async with aiohttp.ClientSession() as session:
+                # Step 1: Initialize OAuth
+                await session.get(
+                    "https://api.librus.pl/OAuth/Authorization?client_id=46&response_type=code&scope=mydata"
+                )
+                
+                # Step 2: Login with credentials
+                form = aiohttp.FormData()
+                form.add_field("action", "login")
+                form.add_field("login", login)
+                form.add_field("pass", password)
+                
+                resp = await session.post(
+                    "https://api.librus.pl/OAuth/Authorization?client_id=46",
+                    data=form
+                )
+                
+                # Check for login error
+                text = await resp.text()
+                if "Nieprawidłowy login" in text or resp.status == 401:
+                    return {"success": False, "error": "Nieprawidłowy login lub hasło"}
+                
+                # Step 3: Grant access
+                resp = await session.get(
+                    "https://api.librus.pl/OAuth/Authorization/Grant?client_id=46"
+                )
+                
+                if resp.status != 200:
+                    return {"success": False, "error": "Grant failed"}
+                
+                # Get cookies from session
+                cookies = session.cookie_jar.filter_cookies("https://synergia.librus.pl")
+                self.cookies = {k: v.value for k, v in cookies.items()}
+                
+                # Step 4: Activate API access
+                activated = await self._activate_api_access(session)
+                
+                if not activated:
+                    return {"success": False, "error": "API activation failed"}
+                
+                # Verify by getting /Me
+                me = await self._get_data_with_session(session, "Me")
+                if me:
+                    user_info = me.get("Me", {}).get("Account", {})
                     return {
                         "success": True,
-                        "cookies": self.cookies_list,
+                        "cookies": self.cookies,
                         "user": {
                             "firstName": user_info.get("FirstName"),
                             "lastName": user_info.get("LastName"),
                             "login": user_info.get("Login")
                         }
                     }
-                except Exception:
-                    pass
-
-            return {"success": False, "error": "Błąd autoryzacji API Librus"}
-
-        except requests.exceptions.Timeout:
-            return {"success": False, "error": "Timeout - serwer Librus nie odpowiada"}
+                
+                return {"success": False, "error": "Could not verify login"}
+                
         except Exception as e:
             return {"success": False, "error": str(e)}
-
-    def get_data(self, method: str):
-        """Get data from Librus API."""
-        if not self.cookies_list:
-            return None
-
+    
+    async def _activate_api_access(self, session) -> bool:
+        """Activate API access by calling TokenInfo and UserInfo endpoints."""
         try:
-            jar = self._build_cookie_jar()
-            resp = requests.get(
-                self.host + method,
-                cookies=jar,
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'application/json'
-                },
-                timeout=10
-            )
-            if resp.status_code == 200:
-                return resp.json()
-            elif resp.status_code == 401:
-                return {"error": "session_expired"}
+            cookies = session.cookie_jar.filter_cookies("https://synergia.librus.pl")
+            
+            async with session.get(self.host + "Auth/TokenInfo", timeout=10) as resp:
+                if resp.status != 200:
+                    return False
+                data = await resp.json()
+                identifier = data.get("UserIdentifier")
+            
+            if identifier:
+                async with session.get(f"{self.host}Auth/UserInfo/{identifier}", timeout=10) as resp:
+                    return resp.status == 200
+            
+            return False
+        except:
+            return False
+    
+    async def _get_data_with_session(self, session, method: str):
+        """Get data from API using existing session."""
+        try:
+            async with session.get(self.host + method, timeout=10) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+        except:
+            pass
+        return None
+    
+    async def get_data(self, method: str):
+        """Get data from Librus API."""
+        if not self.cookies:
+            return None
+        
+        try:
+            async with aiohttp.ClientSession(cookies=self.cookies) as session:
+                async with session.get(self.host + method, timeout=10) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    elif resp.status == 401:
+                        return {"error": "session_expired"}
         except Exception as e:
             return {"error": str(e)}
         return None
-
-    def get_me(self):
+    
+    async def get_me(self):
         """Get current user info."""
-        data = self.get_data("Me")
+        data = await self.get_data("Me")
         if data and "Me" in data:
             return data["Me"]["Account"]
         return None
-
-    def get_subjects(self):
+    
+    async def get_subjects(self):
         """Get all subjects."""
-        data = self.get_data("Subjects")
+        data = await self.get_data("Subjects")
         if data and "Subjects" in data:
             return {x["Id"]: x["Name"] for x in data["Subjects"]}
         return {}
-
-    def get_teachers(self):
+    
+    async def get_teachers(self):
         """Get all teachers."""
-        data = self.get_data("Users")
+        data = await self.get_data("Users")
         if data and "Users" in data:
             return {
                 x["Id"]: {
@@ -151,17 +142,17 @@ class LibrusAPI:
                 } for x in data["Users"]
             }
         return {}
-
-    def get_lessons(self):
+    
+    async def get_lessons(self):
         """Get lessons mapping."""
-        data = self.get_data("Lessons")
+        data = await self.get_data("Lessons")
         if data and "Lessons" in data:
             return {x["Id"]: x["Subject"]["Id"] for x in data["Lessons"]}
         return {}
-
-    def get_attendance_types(self):
+    
+    async def get_attendance_types(self):
         """Get attendance types."""
-        data = self.get_data("Attendances/Types")
+        data = await self.get_data("Attendances/Types")
         if data and "Types" in data:
             return {
                 x["Id"]: {
@@ -171,21 +162,21 @@ class LibrusAPI:
                 } for x in data["Types"]
             }
         return {}
-
-    def get_attendances(self):
+    
+    async def get_attendances(self):
         """Get all attendances with full details."""
-        attendances_data = self.get_data("Attendances")
+        attendances_data = await self.get_data("Attendances")
         if not attendances_data or "Attendances" not in attendances_data:
             if attendances_data and "error" in attendances_data:
                 return attendances_data
             return {"error": "no_data"}
-
+        
         # Get supporting data
-        subjects = self.get_subjects()
-        teachers = self.get_teachers()
-        lessons = self.get_lessons()
-        types = self.get_attendance_types()
-
+        subjects = await self.get_subjects()
+        teachers = await self.get_teachers()
+        lessons = await self.get_lessons()
+        types = await self.get_attendance_types()
+        
         result = []
         stats = {
             "present": 0,
@@ -194,24 +185,28 @@ class LibrusAPI:
             "excused": 0,
             "other": 0
         }
+        
+        # Per-subject stats
         by_subject = {}
-
+        
         for att in attendances_data["Attendances"]:
             type_id = att.get("Type", {}).get("Id")
             lesson_id = att.get("Lesson", {}).get("Id")
             teacher_id = att.get("AddedBy", {}).get("Id")
-
+            
             att_type = types.get(type_id, {})
             subject_id = lessons.get(lesson_id)
             subject_name = subjects.get(subject_id, "Nieznany")
             teacher = teachers.get(teacher_id, {"FirstName": "", "LastName": ""})
-
+            
+            # Initialize subject stats if not exists
             if subject_name not in by_subject:
                 by_subject[subject_name] = {"present": 0, "absent": 0, "late": 0, "excused": 0}
-
+            
+            # Categorize
             short = att_type.get("short", "").lower()
             is_presence = att_type.get("isPresence", False)
-
+            
             if short == "sp" or "spóźn" in att_type.get("name", "").lower():
                 stats["late"] += 1
                 by_subject[subject_name]["late"] += 1
@@ -231,7 +226,7 @@ class LibrusAPI:
             else:
                 stats["other"] += 1
                 category = "other"
-
+            
             result.append({
                 "date": att.get("Date"),
                 "subject": subject_name,
@@ -241,17 +236,20 @@ class LibrusAPI:
                 "semester": att.get("Semester", 1),
                 "teacher": f"{teacher.get('FirstName', '')} {teacher.get('LastName', '')}".strip()
             })
-
+        
+        # Calculate percentage - present AND late counts (excused are still absences)
         total = stats["present"] + stats["absent"] + stats["late"] + stats["excused"]
         percentage = 0
         if total > 0:
             percentage = round((stats["present"] + stats["late"]) / total * 100)
-
+        
+        # Build per-subject list with percentages
         subjects_list = []
         for subj_name, subj_stats in sorted(by_subject.items()):
             subj_total = subj_stats["present"] + subj_stats["absent"] + subj_stats["late"] + subj_stats["excused"]
+            # Present AND late counts as attendance
             subj_pct = round((subj_stats["present"] + subj_stats["late"]) / subj_total * 100) if subj_total > 0 else 100
-
+            
             subjects_list.append({
                 "name": subj_name,
                 "present": subj_stats["present"],
@@ -260,9 +258,10 @@ class LibrusAPI:
                 "late": subj_stats["late"],
                 "percentage": subj_pct
             })
-
+        
+        # Sort by percentage descending (best first)
         subjects_list.sort(key=lambda x: x["percentage"], reverse=True)
-
+        
         return {
             "attendances": result,
             "stats": stats,
@@ -270,20 +269,20 @@ class LibrusAPI:
             "total": total,
             "bySubject": subjects_list
         }
-
-    def get_grades(self):
+    
+    async def get_grades(self):
         """Get all grades."""
-        grades_data = self.get_data("Grades")
+        grades_data = await self.get_data("Grades")
         if not grades_data or "Grades" not in grades_data:
             if grades_data and "error" in grades_data:
                 return grades_data
             return {"error": "no_data"}
-
-        subjects = self.get_subjects()
-        teachers = self.get_teachers()
-
+        
+        subjects = await self.get_subjects()
+        teachers = await self.get_teachers()
+        
         # Get categories
-        categories_data = self.get_data("Grades/Categories")
+        categories_data = await self.get_data("Grades/Categories")
         categories = {}
         if categories_data and "Categories" in categories_data:
             for cat in categories_data["Categories"]:
@@ -291,20 +290,20 @@ class LibrusAPI:
                     "name": cat.get("Name", ""),
                     "weight": cat.get("Weight", 0)
                 }
-
+        
         result = {}
         for grade in grades_data["Grades"]:
             subject_id = grade.get("Subject", {}).get("Id")
             subject_name = subjects.get(subject_id, "Nieznany")
-
+            
             if subject_name not in result:
                 result[subject_name] = []
-
+            
             category_id = grade.get("Category", {}).get("Id")
             category = categories.get(category_id, {})
             teacher_id = grade.get("AddedBy", {}).get("Id")
             teacher = teachers.get(teacher_id, {"FirstName": "", "LastName": ""})
-
+            
             result[subject_name].append({
                 "grade": grade.get("Grade"),
                 "weight": category.get("weight", 0),
@@ -316,5 +315,5 @@ class LibrusAPI:
                 "isSemester": grade.get("IsSemester", False) or grade.get("IsSemesterProposition", False),
                 "teacher": f"{teacher.get('FirstName', '')} {teacher.get('LastName', '')}".strip()
             })
-
+        
         return {"grades": result}

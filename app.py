@@ -1,13 +1,15 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from librus_api import LibrusAPI
+import asyncio
 import uuid
 import time
-import requests as req_lib
+import requests
 
 app = Flask(__name__)
 CORS(app)
 
+# In-memory session storage (for free tier simplicity)
 # In production, use Redis or database
 sessions = {}
 
@@ -32,22 +34,26 @@ def get_session(token: str) -> dict:
     return session
 
 # ========== LIBRUS ENDPOINTS ==========
+
 @app.route('/librus/login', methods=['POST'])
 def librus_login():
     """Login to Librus and return session token."""
     data = request.json
     if not data:
         return jsonify({"success": False, "error": "No data provided"}), 400
-
+    
     login = data.get("login")
     password = data.get("password")
-
+    
     if not login or not password:
         return jsonify({"success": False, "error": "Missing login or password"}), 400
-
-    api = LibrusAPI()
-    result = api.login(login, password)
-
+    
+    async def do_login():
+        api = LibrusAPI()
+        return await api.login(login, password)
+    
+    result = asyncio.run(do_login())
+    
     if result.get("success"):
         # Create session token
         token = str(uuid.uuid4())
@@ -56,7 +62,7 @@ def librus_login():
             "user": result.get("user"),
             "created": time.time()
         }
-
+        
         return jsonify({
             "success": True,
             "token": token,
@@ -72,21 +78,24 @@ def get_attendances():
     auth = request.headers.get("Authorization")
     if not auth or not auth.startswith("Bearer "):
         return jsonify({"success": False, "error": "No authorization"}), 401
-
+    
     token = auth.replace("Bearer ", "")
     session = get_session(token)
-
+    
     if not session:
         return jsonify({"success": False, "error": "Session expired"}), 401
-
-    api = LibrusAPI(cookies=session["cookies"])
-    result = api.get_attendances()
-
+    
+    async def fetch():
+        api = LibrusAPI(cookies=session["cookies"])
+        return await api.get_attendances()
+    
+    result = asyncio.run(fetch())
+    
     if "error" in result:
         if result["error"] == "session_expired":
             return jsonify({"success": False, "error": "Session expired"}), 401
         return jsonify({"success": False, "error": result["error"]}), 500
-
+    
     return jsonify({"success": True, **result})
 
 @app.route('/librus/grades', methods=['GET'])
@@ -95,21 +104,24 @@ def get_grades():
     auth = request.headers.get("Authorization")
     if not auth or not auth.startswith("Bearer "):
         return jsonify({"success": False, "error": "No authorization"}), 401
-
+    
     token = auth.replace("Bearer ", "")
     session = get_session(token)
-
+    
     if not session:
         return jsonify({"success": False, "error": "Session expired"}), 401
-
-    api = LibrusAPI(cookies=session["cookies"])
-    result = api.get_grades()
-
+    
+    async def fetch():
+        api = LibrusAPI(cookies=session["cookies"])
+        return await api.get_grades()
+    
+    result = asyncio.run(fetch())
+    
     if "error" in result:
         if result["error"] == "session_expired":
             return jsonify({"success": False, "error": "Session expired"}), 401
         return jsonify({"success": False, "error": result["error"]}), 500
-
+    
     return jsonify({"success": True, **result})
 
 @app.route('/librus/me', methods=['GET'])
@@ -118,13 +130,13 @@ def get_me():
     auth = request.headers.get("Authorization")
     if not auth or not auth.startswith("Bearer "):
         return jsonify({"success": False, "error": "No authorization"}), 401
-
+    
     token = auth.replace("Bearer ", "")
     session = get_session(token)
-
+    
     if not session:
         return jsonify({"success": False, "error": "Session expired"}), 401
-
+    
     return jsonify({"success": True, "user": session.get("user")})
 
 @app.route('/librus/logout', methods=['POST'])
@@ -135,10 +147,11 @@ def logout():
         token = auth.replace("Bearer ", "")
         if token in sessions:
             del sessions[token]
-
+    
     return jsonify({"success": True, "message": "Wylogowano"})
 
 # ========== EDUPAGE PROXY ==========
+
 EDUPAGE_BASE = "https://zs2ostrzeszow.edupage.org"
 
 @app.route('/edupage/proxy', methods=['POST'])
@@ -147,18 +160,18 @@ def edupage_proxy():
     data = request.json
     if not data:
         return jsonify({"error": "No data provided"}), 400
-
+    
     path = data.get("path", "")
     body = data.get("body", {})
-
+    
     try:
-        resp = req_lib.post(
+        resp = requests.post(
             EDUPAGE_BASE + path,
             json=body,
             headers={"Content-Type": "application/json"},
             timeout=30
         )
-
+        
         try:
             return jsonify(resp.json())
         except:
@@ -167,6 +180,7 @@ def edupage_proxy():
         return jsonify({"error": str(e)}), 500
 
 # ========== HEALTH CHECK ==========
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint."""
@@ -175,20 +189,6 @@ def health():
         "sessions": len(sessions),
         "time": time.strftime("%Y-%m-%d %H:%M:%S")
     })
-
-@app.route('/test-librus', methods=['GET'])
-def test_librus():
-    try:
-        start = time.time()
-        resp = req_lib.get("https://api.librus.pl/OAuth/Authorization?client_id=46", timeout=5)
-        duration = time.time() - start
-        return jsonify({
-            "status": resp.status_code,
-            "time_taken": duration,
-            "text": resp.text[:200]
-        })
-    except Exception as e:
-        return jsonify({"error": str(e), "time_taken": time.time() - start}), 500
 
 @app.route('/', methods=['GET'])
 def home():
