@@ -1,62 +1,103 @@
 import aiohttp
-import json
-from datetime import datetime
+import asyncio
+import logging
+import time
+
+
+logger = logging.getLogger(__name__)
 
 class LibrusAPI:
-    def __init__(self, cookies=None):
+    def __init__(self, cookies=None, trace_id: str | None = None):
         self.host = "https://synergia.librus.pl/gateway/api/2.0/"
         self.cookies = cookies
+        self.trace_id = trace_id or "librus"
+        self.login_timeout = aiohttp.ClientTimeout(total=15, connect=10, sock_connect=10, sock_read=10)
+        self.data_timeout = aiohttp.ClientTimeout(total=12, connect=8, sock_connect=8, sock_read=8)
+
+    def _log(self, level: int, message: str, *args, **kwargs) -> None:
+        logger.log(level, "[%s] " + message, self.trace_id, *args, **kwargs)
+
+    def _mask_login(self, login: str) -> str:
+        if len(login) <= 2:
+            return "*" * len(login)
+        hidden = max(len(login) - 4, 1)
+        return f"{login[:2]}{'*' * hidden}{login[-2:]}"
         
     async def login(self, login: str, password: str) -> dict:
         """
         Authenticate with Librus and return session cookies.
         Based on librusik implementation.
         """
+        started_at = time.monotonic()
+        self._log(logging.INFO, "Starting login flow for %s", self._mask_login(login))
+
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=self.login_timeout) as session:
                 # Step 1: Initialize OAuth
-                await session.get(
+                self._log(logging.INFO, "Login step 1/5: initialize OAuth")
+                async with session.get(
                     "https://api.librus.pl/OAuth/Authorization?client_id=46&response_type=code&scope=mydata"
-                )
+                ) as resp:
+                    await resp.read()
+                    if resp.status >= 500:
+                        self._log(logging.WARNING, "OAuth init failed with status %s", resp.status)
+                        return {"success": False, "error": "Librus jest chwilowo niedostepny", "code": "upstream_unavailable"}
                 
                 # Step 2: Login with credentials
+                self._log(logging.INFO, "Login step 2/5: submit credentials")
                 form = aiohttp.FormData()
                 form.add_field("action", "login")
                 form.add_field("login", login)
                 form.add_field("pass", password)
                 
-                resp = await session.post(
+                async with session.post(
                     "https://api.librus.pl/OAuth/Authorization?client_id=46",
                     data=form
-                )
-                
-                # Check for login error
-                text = await resp.text()
-                if "Nieprawidłowy login" in text or resp.status == 401:
-                    return {"success": False, "error": "Nieprawidłowy login lub hasło"}
+                ) as resp:
+                    text = await resp.text()
+                    if "Nieprawidłowy login" in text or resp.status == 401:
+                        self._log(logging.INFO, "Login rejected by Librus")
+                        return {"success": False, "error": "Nieprawidlowy login lub haslo", "code": "invalid_credentials"}
+                    if resp.status >= 500:
+                        self._log(logging.WARNING, "Credential submit failed with status %s", resp.status)
+                        return {"success": False, "error": "Librus jest chwilowo niedostepny", "code": "upstream_unavailable"}
                 
                 # Step 3: Grant access
-                resp = await session.get(
+                self._log(logging.INFO, "Login step 3/5: grant access")
+                async with session.get(
                     "https://api.librus.pl/OAuth/Authorization/Grant?client_id=46"
-                )
-                
-                if resp.status != 200:
-                    return {"success": False, "error": "Grant failed"}
+                ) as resp:
+                    if resp.status != 200:
+                        body = (await resp.text())[:200]
+                        self._log(logging.WARNING, "Grant failed with status %s body=%r", resp.status, body)
+                        return {
+                            "success": False,
+                            "error": "Nie udalo sie dokonczyc logowania w Librusie",
+                            "code": "grant_failed"
+                        }
+                    await resp.read()
                 
                 # Get cookies from session
                 cookies = session.cookie_jar.filter_cookies("https://synergia.librus.pl")
                 self.cookies = {k: v.value for k, v in cookies.items()}
+                self._log(logging.INFO, "Login step 4/5: activate API access")
                 
                 # Step 4: Activate API access
                 activated = await self._activate_api_access(session)
                 
                 if not activated:
-                    return {"success": False, "error": "API activation failed"}
+                    return {
+                        "success": False,
+                        "error": "Nie udalo sie aktywowac dostepu do API Librusa",
+                        "code": "activation_failed"
+                    }
                 
                 # Verify by getting /Me
+                self._log(logging.INFO, "Login step 5/5: verify session")
                 me = await self._get_data_with_session(session, "Me")
-                if me:
+                if me and "Me" in me:
                     user_info = me.get("Me", {}).get("Account", {})
+                    self._log(logging.INFO, "Login flow finished in %.2fs", time.monotonic() - started_at)
                     return {
                         "success": True,
                         "cookies": self.cookies,
@@ -66,74 +107,123 @@ class LibrusAPI:
                             "login": user_info.get("Login")
                         }
                     }
+                if me and me.get("error") == "request_timeout":
+                    return {
+                        "success": False,
+                        "error": "Librus odpowiadal zbyt dlugo podczas potwierdzania sesji",
+                        "code": "timeout"
+                    }
                 
-                return {"success": False, "error": "Could not verify login"}
+                return {
+                    "success": False,
+                    "error": "Nie udalo sie potwierdzic sesji Librusa",
+                    "code": "login_verification_failed"
+                }
                 
+        except asyncio.TimeoutError:
+            self._log(logging.WARNING, "Login flow timed out after %.2fs", time.monotonic() - started_at)
+            return {
+                "success": False,
+                "error": "Librus odpowiadal zbyt dlugo. Sprobuj ponownie za chwile.",
+                "code": "timeout"
+            }
+        except aiohttp.ClientError as e:
+            self._log(logging.ERROR, "Login flow client error: %s", e)
+            return {
+                "success": False,
+                "error": "Nie udalo sie polaczyc z Librusem.",
+                "code": "connection_error"
+            }
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            self._log(logging.ERROR, "Unexpected login error: %s", e, exc_info=True)
+            return {
+                "success": False,
+                "error": "Wystapil wewnetrzny blad logowania do Librusa.",
+                "code": "internal_error"
+            }
     
     async def _activate_api_access(self, session) -> bool:
         """Activate API access by calling TokenInfo and UserInfo endpoints."""
         try:
-            cookies = session.cookie_jar.filter_cookies("https://synergia.librus.pl")
-            
-            async with session.get(self.host + "Auth/TokenInfo", timeout=10) as resp:
-                if resp.status != 200:
-                    return False
-                data = await resp.json()
-                identifier = data.get("UserIdentifier")
+            self._log(logging.INFO, "Activation step 1/2: Auth/TokenInfo")
+            data = await self._get_data_with_session(session, "Auth/TokenInfo")
+            if not data or data.get("error"):
+                self._log(logging.WARNING, "TokenInfo failed: %s", data.get("error") if isinstance(data, dict) else "no_data")
+                return False
+
+            identifier = data.get("UserIdentifier")
             
             if identifier:
-                async with session.get(f"{self.host}Auth/UserInfo/{identifier}", timeout=10) as resp:
-                    return resp.status == 200
+                self._log(logging.INFO, "Activation step 2/2: Auth/UserInfo/%s", identifier)
+                user_info = await self._get_data_with_session(session, f"Auth/UserInfo/{identifier}")
+                if user_info and not user_info.get("error"):
+                    return True
+                self._log(
+                    logging.WARNING,
+                    "UserInfo activation failed: %s",
+                    user_info.get("error") if isinstance(user_info, dict) else "no_data"
+                )
+                return False
             
+            self._log(logging.WARNING, "TokenInfo did not return UserIdentifier")
             return False
-        except:
+        except Exception:
+            self._log(logging.ERROR, "Unexpected activation error", exc_info=True)
             return False
     
     async def _get_data_with_session(self, session, method: str):
         """Get data from API using existing session."""
         try:
-            async with session.get(self.host + method, timeout=10) as resp:
+            async with session.get(self.host + method, timeout=self.data_timeout) as resp:
                 if resp.status == 200:
-                    return await resp.json()
-        except:
-            pass
-        return None
+                    return await resp.json(content_type=None)
+                if resp.status == 401:
+                    self._log(logging.INFO, "Request %s returned 401", method)
+                    return {"error": "session_expired"}
+
+                body = (await resp.text())[:200]
+                self._log(logging.WARNING, "Request %s failed with status %s body=%r", method, resp.status, body)
+                if resp.status >= 500:
+                    return {"error": "upstream_unavailable"}
+                return {"error": f"request_failed_{resp.status}"}
+        except asyncio.TimeoutError:
+            self._log(logging.WARNING, "Request %s timed out", method)
+            return {"error": "request_timeout"}
+        except aiohttp.ClientError as e:
+            self._log(logging.ERROR, "Request %s client error: %s", method, e)
+            return {"error": "connection_error"}
+        except Exception:
+            self._log(logging.ERROR, "Unexpected request error for %s", method, exc_info=True)
+            return {"error": "internal_error"}
     
-    async def get_data(self, method: str):
+    async def get_data(self, method: str, session: aiohttp.ClientSession | None = None):
         """Get data from Librus API."""
         if not self.cookies:
-            return None
+            return {"error": "session_missing"}
         
-        try:
-            async with aiohttp.ClientSession(cookies=self.cookies) as session:
-                async with session.get(self.host + method, timeout=10) as resp:
-                    if resp.status == 200:
-                        return await resp.json()
-                    elif resp.status == 401:
-                        return {"error": "session_expired"}
-        except Exception as e:
-            return {"error": str(e)}
-        return None
+        if session is not None:
+            return await self._get_data_with_session(session, method)
+
+        async with aiohttp.ClientSession(cookies=self.cookies, timeout=self.data_timeout) as new_session:
+            return await self._get_data_with_session(new_session, method)
     
-    async def get_me(self):
+    async def get_me(self, session: aiohttp.ClientSession | None = None):
         """Get current user info."""
-        data = await self.get_data("Me")
+        data = await self.get_data("Me", session=session)
         if data and "Me" in data:
             return data["Me"]["Account"]
         return None
     
-    async def get_subjects(self):
+    async def get_subjects(self, session: aiohttp.ClientSession | None = None):
         """Get all subjects."""
-        data = await self.get_data("Subjects")
+        data = await self.get_data("Subjects", session=session)
         if data and "Subjects" in data:
             return {x["Id"]: x["Name"] for x in data["Subjects"]}
         return {}
     
-    async def get_teachers(self):
+    async def get_teachers(self, session: aiohttp.ClientSession | None = None):
         """Get all teachers."""
-        data = await self.get_data("Users")
+        data = await self.get_data("Users", session=session)
         if data and "Users" in data:
             return {
                 x["Id"]: {
@@ -143,16 +233,16 @@ class LibrusAPI:
             }
         return {}
     
-    async def get_lessons(self):
+    async def get_lessons(self, session: aiohttp.ClientSession | None = None):
         """Get lessons mapping."""
-        data = await self.get_data("Lessons")
+        data = await self.get_data("Lessons", session=session)
         if data and "Lessons" in data:
             return {x["Id"]: x["Subject"]["Id"] for x in data["Lessons"]}
         return {}
     
-    async def get_attendance_types(self):
+    async def get_attendance_types(self, session: aiohttp.ClientSession | None = None):
         """Get attendance types."""
-        data = await self.get_data("Attendances/Types")
+        data = await self.get_data("Attendances/Types", session=session)
         if data and "Types" in data:
             return {
                 x["Id"]: {
@@ -165,17 +255,22 @@ class LibrusAPI:
     
     async def get_attendances(self):
         """Get all attendances with full details."""
-        attendances_data = await self.get_data("Attendances")
-        if not attendances_data or "Attendances" not in attendances_data:
-            if attendances_data and "error" in attendances_data:
-                return attendances_data
-            return {"error": "no_data"}
-        
-        # Get supporting data
-        subjects = await self.get_subjects()
-        teachers = await self.get_teachers()
-        lessons = await self.get_lessons()
-        types = await self.get_attendance_types()
+        started_at = time.monotonic()
+        self._log(logging.INFO, "Fetching attendances")
+
+        async with aiohttp.ClientSession(cookies=self.cookies, timeout=self.data_timeout) as session:
+            attendances_data = await self.get_data("Attendances", session=session)
+            if not attendances_data or "Attendances" not in attendances_data:
+                if attendances_data and "error" in attendances_data:
+                    return attendances_data
+                return {"error": "no_data"}
+
+            subjects, teachers, lessons, types = await asyncio.gather(
+                self.get_subjects(session=session),
+                self.get_teachers(session=session),
+                self.get_lessons(session=session),
+                self.get_attendance_types(session=session)
+            )
         
         result = []
         stats = {
@@ -261,6 +356,7 @@ class LibrusAPI:
         
         # Sort by percentage descending (best first)
         subjects_list.sort(key=lambda x: x["percentage"], reverse=True)
+        self._log(logging.INFO, "Attendances fetched in %.2fs", time.monotonic() - started_at)
         
         return {
             "attendances": result,
@@ -272,17 +368,22 @@ class LibrusAPI:
     
     async def get_grades(self):
         """Get all grades."""
-        grades_data = await self.get_data("Grades")
+        started_at = time.monotonic()
+        self._log(logging.INFO, "Fetching grades")
+
+        async with aiohttp.ClientSession(cookies=self.cookies, timeout=self.data_timeout) as session:
+            grades_data, subjects, teachers, categories_data = await asyncio.gather(
+                self.get_data("Grades", session=session),
+                self.get_subjects(session=session),
+                self.get_teachers(session=session),
+                self.get_data("Grades/Categories", session=session)
+            )
+
         if not grades_data or "Grades" not in grades_data:
             if grades_data and "error" in grades_data:
                 return grades_data
             return {"error": "no_data"}
-        
-        subjects = await self.get_subjects()
-        teachers = await self.get_teachers()
-        
-        # Get categories
-        categories_data = await self.get_data("Grades/Categories")
+
         categories = {}
         if categories_data and "Categories" in categories_data:
             for cat in categories_data["Categories"]:
@@ -315,5 +416,6 @@ class LibrusAPI:
                 "isSemester": grade.get("IsSemester", False) or grade.get("IsSemesterProposition", False),
                 "teacher": f"{teacher.get('FirstName', '')} {teacher.get('LastName', '')}".strip()
             })
-        
+
+        self._log(logging.INFO, "Grades fetched in %.2fs", time.monotonic() - started_at)
         return {"grades": result}
